@@ -6,6 +6,10 @@ import { createClient } from '@/utils/supabase/server';
 import type { ActionState } from '@/app/(auth)/actions';
 import nodemailer from 'nodemailer';
 import { toCapitalizedSentence, toNormalizedCode, toNormalizedEmail } from '@/utils/formatters/text-sanitizer';
+import {
+  checkRateLimit,
+  logSecurityEvent,
+} from '@/utils/security/rate-limiter';
 
 // ============================================================================
 // ESQUEMAS DE VALIDACIÓN CON ZOD
@@ -262,6 +266,25 @@ export async function invitarEstudianteGrupoAction(
 
   if (!user) {
     return { success: false, message: 'Sesión expirada.' };
+  }
+
+  // Control 12: Rate limit de 15 invitaciones por minuto por docente
+  const rateLimitKey = `invitar:${user.id}`;
+  const rateCheck = checkRateLimit(rateLimitKey, 15, 60 * 1000);
+
+  if (!rateCheck.allowed) {
+    logSecurityEvent('RATE_LIMIT_EXCEEDED', {
+      action: 'invitar_estudiante',
+      docenteId: user.id,
+      grupoId: parsed.data.grupo_id,
+      retryAfterSeconds: rateCheck.retryAfterSeconds,
+    });
+
+    return {
+      success: false,
+      message:
+        'Has alcanzado el límite de invitaciones por minuto. Espera un momento antes de enviar más.',
+    };
   }
 
   const { grupo_id, email_estudiante } = parsed.data;

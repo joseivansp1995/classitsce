@@ -4,7 +4,10 @@ import { z } from 'zod';
 import { revalidatePath } from 'next/cache';
 import { createClient } from '@/utils/supabase/server';
 import type { ActionState } from '@/app/(auth)/actions';
-import { validateUploadedFile } from '@/utils/formatters/text-sanitizer';
+import {
+  validateUploadedFile,
+  validateFileMagicBytes,
+} from '@/utils/formatters/text-sanitizer';
 
 const EntregarTareaSchema = z.object({
   tarea_id: z.string().uuid(),
@@ -94,6 +97,16 @@ export async function entregarTareaAction(
       return {
         success: false,
         message: validation.error || 'Archivo de entrega inválido (máx. 10 MB).',
+      };
+    }
+
+    const magicValidation = await validateFileMagicBytes(archivo);
+    if (!magicValidation.valid) {
+      return {
+        success: false,
+        message:
+          magicValidation.error ||
+          'El contenido del archivo no coincide con su extensión o es potencialmente inseguro.',
       };
     }
 

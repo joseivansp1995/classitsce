@@ -4,7 +4,11 @@ import { z } from 'zod';
 import { revalidatePath } from 'next/cache';
 import { createClient } from '@/utils/supabase/server';
 import type { ActionState } from '@/app/(auth)/actions';
-import { toCapitalizedSentence, validateUploadedFile } from '@/utils/formatters/text-sanitizer';
+import {
+  toCapitalizedSentence,
+  validateUploadedFile,
+  validateFileMagicBytes,
+} from '@/utils/formatters/text-sanitizer';
 
 // ============================================================================
 // ESQUEMAS DE VALIDACIÓN CON ZOD
@@ -78,6 +82,16 @@ export async function subirMaterialDidacticoAction(
     return {
       success: false,
       message: validation.error || 'Debes adjuntar un archivo válido (máx. 15 MB).',
+    };
+  }
+
+  const magicValidation = await validateFileMagicBytes(archivo!);
+  if (!magicValidation.valid) {
+    return {
+      success: false,
+      message:
+        magicValidation.error ||
+        'El contenido del archivo no coincide con su extensión o es potencialmente inseguro.',
     };
   }
 

@@ -33,6 +33,10 @@ export async function createClient() {
  * NUNCA importar este archivo en un Client Component.
  */
 export function createAdminClient() {
+  if (typeof window !== 'undefined') {
+    throw new Error('createAdminClient solo puede ejecutarse en el servidor');
+  }
+
   const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
   if (!serviceRoleKey) {
     throw new Error('SUPABASE_SERVICE_ROLE_KEY no está configurada en el servidor.');

@@ -6,6 +6,11 @@ import { redirect } from 'next/navigation';
 import { createClient, createAdminClient } from '@/utils/supabase/server';
 import type { UserRole } from '@/types/database';
 import { toTitleCase, toNormalizedEmail } from '@/utils/formatters/text-sanitizer';
+import {
+  checkRateLimit,
+  getClientIp,
+  logSecurityEvent,
+} from '@/utils/security/rate-limiter';
 
 // ============================================================================
 // ESQUEMAS DE VALIDACIÓN CON ZOD
@@ -78,6 +83,27 @@ export async function loginAction(
   _prevState: ActionState | null,
   formData: FormData
 ): Promise<ActionState> {
+  // Control 12: Rate limit de 5 intentos cada 5 minutos por combinación IP + correo
+  const clientIp = await getClientIp();
+  const rawEmail = ((formData.get('email') as string) || '').trim().toLowerCase();
+  const rateLimitKey = `login:${clientIp}:${rawEmail || 'anon'}`;
+  const rateCheck = checkRateLimit(rateLimitKey, 5, 5 * 60 * 1000);
+
+  if (!rateCheck.allowed) {
+    logSecurityEvent('RATE_LIMIT_EXCEEDED', {
+      action: 'login',
+      ip: clientIp,
+      email: rawEmail,
+      retryAfterSeconds: rateCheck.retryAfterSeconds,
+    });
+
+    return {
+      success: false,
+      message:
+        'Demasiados intentos de inicio de sesión. Por seguridad, espera unos minutos antes de intentar de nuevo.',
+    };
+  }
+
   const parsed = LoginSchema.safeParse({
     email: formData.get('email'),
     password: formData.get('password'),
@@ -138,6 +164,25 @@ export async function registrarEstudiantePorInvitacionAction(
   _prevState: ActionState | null,
   formData: FormData
 ): Promise<ActionState> {
+  // Control 12: Rate limit de 5 intentos cada 5 minutos por IP
+  const clientIp = await getClientIp();
+  const rateLimitKey = `registro:${clientIp}`;
+  const rateCheck = checkRateLimit(rateLimitKey, 5, 5 * 60 * 1000);
+
+  if (!rateCheck.allowed) {
+    logSecurityEvent('RATE_LIMIT_EXCEEDED', {
+      action: 'registro_estudiante',
+      ip: clientIp,
+      retryAfterSeconds: rateCheck.retryAfterSeconds,
+    });
+
+    return {
+      success: false,
+      message:
+        'Demasiadas solicitudes de registro desde esta conexión. Espera unos minutos antes de intentar de nuevo.',
+    };
+  }
+
   const parsed = RegistroEstudianteInvitacionSchema.safeParse({
     token: formData.get('token'),
     nombre_completo: formData.get('nombre_completo'),
@@ -237,18 +282,36 @@ export async function registrarEstudiantePorInvitacionAction(
     };
   }
 
-  // 4. Matricular automáticamente al estudiante en el grupo y marcar invitación como aceptada
+  // 4. Reclamar la invitación de forma atómica para evitar condiciones de carrera (TOCTOU)
+  const { data: updatedInv, error: claimError } = await adminSupabase
+    .from('invitaciones')
+    .update({ estado: 'aceptada' })
+    .eq('id', invitacion.id)
+    .eq('estado', 'pendiente')
+    .select('id')
+    .single();
+
+  if (claimError || !updatedInv) {
+    // Si la invitación ya no estaba pendiente, revertir la creación de la cuenta
+    await adminSupabase.auth.admin.deleteUser(estudianteId);
+    logSecurityEvent('CONCURRENT_TOKEN_CLAIM_PREVENTED', {
+      action: 'registro_estudiante',
+      invitacionId: invitacion.id,
+      email,
+    });
+    return {
+      success: false,
+      message: 'Esta invitación ya fue procesada o aceptada por otra sesión.',
+    };
+  }
+
+  // 5. Matricular automáticamente al estudiante en el grupo
   await adminSupabase.from('matriculas').insert({
     grupo_id: invitacion.grupo_id,
     estudiante_id: estudianteId,
   });
 
-  await adminSupabase
-    .from('invitaciones')
-    .update({ estado: 'aceptada' })
-    .eq('id', invitacion.id);
-
-  // 5. Iniciar sesión automáticamente para el estudiante recién registrado
+  // 6. Iniciar sesión automáticamente para el estudiante recién registrado
   const supabase = await createClient();
   await supabase.auth.signInWithPassword({ email, password });
 
